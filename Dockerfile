@@ -1,4 +1,4 @@
-FROM python:3.13-slim
+FROM python:3.11-slim
 
 WORKDIR /app
 
@@ -18,5 +18,6 @@ COPY . .
 
 ENV YT_DLP_PATH=yt-dlp
 ENV FFMPEG_PATH=ffmpeg
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7860"]
