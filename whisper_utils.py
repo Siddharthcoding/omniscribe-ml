@@ -4,6 +4,8 @@ import os
 import subprocess
 import re
 from typing import List, Dict
+from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api.formatters import SRTFormatter
 
 
 _model = None
@@ -16,104 +18,38 @@ def get_model():
     return _model
 
 
-def extract_subtitles(video_url: str) -> List[Dict] | None:
-    tmp_dir = tempfile.mkdtemp()
-    yt_dlp_path = os.environ.get("YT_DLP_PATH", "yt-dlp")
+def _extract_video_id(url: str) -> str | None:
+    patterns = [
+        r"(?:v=|/v/|youtu\.be/|/embed/|/shorts/)([A-Za-z0-9_-]{11})",
+        r"^([A-Za-z0-9_-]{11})$",
+    ]
+    for p in patterns:
+        m = re.search(p, url)
+        if m:
+            return m.group(1)
+    return None
 
-    result = subprocess.run(
-        [
-            yt_dlp_path,
-            "--skip-download",
-            "--write-auto-subs",
-            "--sub-lang", "en",
-            "-o", os.path.join(tmp_dir, "%(id)s"),
-            "--no-check-certificates",
-            "--extractor-args", "youtube:player_client=android",
-            video_url,
-        ],
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
 
-    sub_path = None
-    for f in os.listdir(tmp_dir):
-        if f.endswith(".vtt") or f.endswith(".srt"):
-            sub_path = os.path.join(tmp_dir, f)
-            break
-
-    if not sub_path or not os.path.exists(sub_path):
+def extract_youtube_transcript(video_url: str) -> List[Dict] | None:
+    video_id = _extract_video_id(video_url)
+    if not video_id:
         return None
 
-    with open(sub_path, encoding="utf-8", errors="replace") as f:
-        content = f.read()
-
-    segments = _parse_vtt(content) if sub_path.endswith(".vtt") else _parse_srt(content)
-
-    for f in os.listdir(tmp_dir):
-        fp = os.path.join(tmp_dir, f)
-        try:
-            os.remove(fp)
-        except OSError:
-            pass
     try:
-        os.rmdir(tmp_dir)
-    except OSError:
-        pass
-
-    return segments if segments else None
-
-
-def _parse_vtt(content: str) -> List[Dict]:
-    segments = []
-    block_pattern = re.compile(
-        r"(\d{1,2}:\d{2}:\d{2}[.,]\d{3})\s*-->\s*(\d{1,2}:\d{2}:\d{2}[.,]\d{3})\n([\s\S]*?)(?=\n\n|\Z)",
-        re.MULTILINE,
-    )
-
-    def _ts_to_seconds(ts: str) -> float:
-        ts = ts.replace(",", ".")
-        parts = ts.split(":")
-        if len(parts) == 3:
-            return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
-        return 0.0
-
-    for match in block_pattern.finditer(content):
-        start = _ts_to_seconds(match.group(1))
-        end = _ts_to_seconds(match.group(2))
-        text = " ".join(match.group(3).strip().split("\n"))
-        text = re.sub(r"<[^>]+>", "", text)
-        if text:
-            segments.append({"text": text, "start": start, "end": end})
-
-    return segments
+        transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=["en"])
+        segments = []
+        for entry in transcript_list:
+            segments.append({
+                "text": entry["text"].strip(),
+                "start": entry["start"],
+                "end": entry["start"] + entry.get("duration", 0),
+            })
+        return segments
+    except Exception:
+        return None
 
 
-def _parse_srt(content: str) -> List[Dict]:
-    segments = []
-    block_pattern = re.compile(
-        r"\d+\n(\d{1,2}:\d{2}:\d{2}[.,]\d{3})\s*-->\s*(\d{1,2}:\d{2}:\d{2}[.,]\d{3})\n([\s\S]*?)(?=\n\n|\Z)",
-        re.MULTILINE,
-    )
-
-    def _ts_to_seconds(ts: str) -> float:
-        ts = ts.replace(",", ".")
-        parts = ts.split(":")
-        if len(parts) == 3:
-            return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
-        return 0.0
-
-    for match in block_pattern.finditer(content):
-        start = _ts_to_seconds(match.group(1))
-        end = _ts_to_seconds(match.group(2))
-        text = " ".join(match.group(3).strip().split("\n"))
-        if text:
-            segments.append({"text": text, "start": start, "end": end})
-
-    return segments
-
-
-def extract_audio(video_url: str) -> str:
+def _extract_audio(video_url: str) -> str:
     tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
     tmp.close()
 
@@ -170,19 +106,19 @@ def transcribe(audio_path: str) -> List[Dict]:
 
 
 def transcribe_from_url(video_url: str) -> dict:
-    segments = extract_subtitles(video_url)
+    segments = extract_youtube_transcript(video_url)
     if segments:
         full_text = " ".join(s["text"] for s in segments)
         return {
             "segments": segments,
             "full_text": full_text,
             "language": "en",
-            "source": "subtitles",
+            "source": "youtube_api",
         }
 
     audio_path = None
     try:
-        audio_path = extract_audio(video_url)
+        audio_path = _extract_audio(video_url)
         segments = transcribe(audio_path)
         full_text = " ".join(s["text"] for s in segments)
         return {
