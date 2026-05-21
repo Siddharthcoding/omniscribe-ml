@@ -20,13 +20,14 @@ def extract_subtitles(video_url: str) -> List[Dict] | None:
     tmp_dir = tempfile.mkdtemp()
     yt_dlp_path = os.environ.get("YT_DLP_PATH", "yt-dlp")
 
-    subprocess.run(
+    result = subprocess.run(
         [
             yt_dlp_path,
             "--skip-download",
             "--write-auto-subs",
             "--sub-lang", "en",
             "-o", os.path.join(tmp_dir, "%(id)s"),
+            "--no-check-certificates",
             video_url,
         ],
         capture_output=True,
@@ -125,6 +126,7 @@ def extract_audio(video_url: str) -> str:
             "--audio-quality", "0",
             "-o", tmp.name.replace(".wav", ".%(ext)s"),
             "--print", "filename",
+            "--no-check-certificates",
             video_url,
         ],
         capture_output=True,
