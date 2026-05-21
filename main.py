@@ -31,8 +31,8 @@ def verify_auth(authorization: str | None = Header(None)):
 
 
 @app.post("/transcribe", response_model=TranscribeResponse)
-async def transcribe_endpoint(req: TranscribeRequest, auth=Header(None)):
-    verify_auth(auth)
+async def transcribe_endpoint(req: TranscribeRequest, authorization: str | None = Header(None)):
+    verify_auth(authorization)
 
     try:
         result = await asyncio.to_thread(transcribe_from_url, req.video_url)
