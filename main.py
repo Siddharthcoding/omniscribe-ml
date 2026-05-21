@@ -16,9 +16,7 @@ class TranscribeRequest(BaseModel):
 
 
 class TranscribeResponse(BaseModel):
-    segments: list[dict]
-    full_text: str
-    language: str
+    status: str
 
 
 def verify_auth(authorization: str | None = Header(None)):
@@ -33,24 +31,27 @@ def verify_auth(authorization: str | None = Header(None)):
 @app.post("/transcribe", response_model=TranscribeResponse)
 async def transcribe_endpoint(req: TranscribeRequest, authorization: str | None = Header(None)):
     verify_auth(authorization)
+    asyncio.create_task(_process_and_webhook(req.video_url, req.webhook_url))
+    return {"status": "accepted"}
 
+
+async def _process_and_webhook(video_url: str, webhook_url: str | None):
     try:
-        result = await asyncio.to_thread(transcribe_from_url, req.video_url)
+        result = await asyncio.to_thread(transcribe_from_url, video_url)
     except Exception as e:
-        raise HTTPException(500, f"Transcription failed: {str(e)}")
+        print(f"Transcription failed: {e}")
+        return
 
-    if req.webhook_url:
-        asyncio.create_task(_send_webhook(req.webhook_url, result))
-
-    return result
+    if webhook_url:
+        await _send_webhook(webhook_url, result)
 
 
 async def _send_webhook(url: str, payload: dict):
     async with httpx.AsyncClient() as client:
         try:
-            await client.post(url, json=payload, timeout=30)
-        except Exception:
-            pass  # fire-and-forget
+            await client.post(url, json=payload, timeout=60)
+        except Exception as e:
+            print(f"Webhook failed: {e}")
 
 
 @app.get("/health")
