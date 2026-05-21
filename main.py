@@ -57,3 +57,13 @@ async def _send_webhook(url: str, payload: dict):
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.post("/debug-transcribe")
+async def debug_transcribe(req: TranscribeRequest, authorization: str | None = Header(None)):
+    verify_auth(authorization)
+    try:
+        result = await asyncio.to_thread(transcribe_from_url, req.video_url)
+        return result
+    except Exception as e:
+        raise HTTPException(500, f"Transcription failed: {str(e)}")

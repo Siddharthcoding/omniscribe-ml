@@ -20,15 +20,13 @@ def extract_subtitles(video_url: str) -> List[Dict] | None:
     tmp_dir = tempfile.mkdtemp()
     yt_dlp_path = os.environ.get("YT_DLP_PATH", "yt-dlp")
 
-    result = subprocess.run(
+    subprocess.run(
         [
             yt_dlp_path,
             "--skip-download",
             "--write-auto-subs",
             "--sub-lang", "en",
-            "--convert-subs", "srt",
             "-o", os.path.join(tmp_dir, "%(id)s"),
-            "--print", "filename",
             video_url,
         ],
         capture_output=True,
@@ -36,30 +34,19 @@ def extract_subtitles(video_url: str) -> List[Dict] | None:
         timeout=120,
     )
 
-    if result.returncode != 0:
-        return None
-
-    output_file = result.stdout.strip().split("\n")[0].strip()
-    srt_path = None
+    sub_path = None
     for f in os.listdir(tmp_dir):
-        if f.endswith(".srt") or f.endswith(".vtt"):
-            srt_path = os.path.join(tmp_dir, f)
+        if f.endswith(".vtt") or f.endswith(".srt"):
+            sub_path = os.path.join(tmp_dir, f)
             break
-    if output_file and os.path.isfile(output_file):
-        possible = output_file
-        for ext in [".en.srt", ".srt", ".en.vtt", ".vtt"]:
-            candidate = possible + ext
-            if os.path.exists(candidate):
-                srt_path = candidate
-                break
 
-    if not srt_path or not os.path.exists(srt_path):
+    if not sub_path or not os.path.exists(sub_path):
         return None
 
-    with open(srt_path, encoding="utf-8", errors="replace") as f:
+    with open(sub_path, encoding="utf-8", errors="replace") as f:
         content = f.read()
 
-    segments = _parse_srt(content)
+    segments = _parse_vtt(content) if sub_path.endswith(".vtt") else _parse_srt(content)
 
     for f in os.listdir(tmp_dir):
         fp = os.path.join(tmp_dir, f)
@@ -73,6 +60,31 @@ def extract_subtitles(video_url: str) -> List[Dict] | None:
         pass
 
     return segments if segments else None
+
+
+def _parse_vtt(content: str) -> List[Dict]:
+    segments = []
+    block_pattern = re.compile(
+        r"(\d{1,2}:\d{2}:\d{2}[.,]\d{3})\s*-->\s*(\d{1,2}:\d{2}:\d{2}[.,]\d{3})\n([\s\S]*?)(?=\n\n|\Z)",
+        re.MULTILINE,
+    )
+
+    def _ts_to_seconds(ts: str) -> float:
+        ts = ts.replace(",", ".")
+        parts = ts.split(":")
+        if len(parts) == 3:
+            return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+        return 0.0
+
+    for match in block_pattern.finditer(content):
+        start = _ts_to_seconds(match.group(1))
+        end = _ts_to_seconds(match.group(2))
+        text = " ".join(match.group(3).strip().split("\n"))
+        text = re.sub(r"<[^>]+>", "", text)
+        if text:
+            segments.append({"text": text, "start": start, "end": end})
+
+    return segments
 
 
 def _parse_srt(content: str) -> List[Dict]:
