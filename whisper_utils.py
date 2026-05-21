@@ -3,8 +3,8 @@ import tempfile
 import os
 import subprocess
 import re
+import httpx
 from typing import List, Dict
-from youtube_transcript_api import YouTubeTranscriptApi
 
 
 _model = None
@@ -35,14 +35,19 @@ def extract_youtube_transcript(video_url: str) -> List[Dict] | None:
         return None
 
     try:
-        api = YouTubeTranscriptApi()
-        fetched = api.fetch(video_id, languages=["en"])
+        resp = httpx.get(
+            f"https://youtubetranscript.com/?v={video_id}&format=json",
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
         segments = []
-        for snippet in fetched.snippets:
+        for entry in data:
             segments.append({
-                "text": snippet.text.strip(),
-                "start": snippet.start,
-                "end": snippet.start + snippet.duration,
+                "text": entry["text"].strip(),
+                "start": entry["start"],
+                "end": entry["start"] + entry.get("duration", 0),
             })
         return segments
     except Exception:
