@@ -12,6 +12,7 @@ AUTH_TOKEN = os.environ.get("OMNISCRIBE_AUTH_TOKEN", "")
 
 class TranscribeRequest(BaseModel):
     video_url: str
+    video_id: str | None = None
     webhook_url: str | None = None
 
 
@@ -31,19 +32,22 @@ def verify_auth(authorization: str | None = Header(None)):
 @app.post("/transcribe", response_model=TranscribeResponse)
 async def transcribe_endpoint(req: TranscribeRequest, authorization: str | None = Header(None)):
     verify_auth(authorization)
-    asyncio.create_task(_process_and_webhook(req.video_url, req.webhook_url))
+    asyncio.create_task(_process_and_webhook(req.video_url, req.video_id, req.webhook_url))
     return {"status": "accepted"}
 
 
-async def _process_and_webhook(video_url: str, webhook_url: str | None):
+async def _process_and_webhook(video_url: str, video_id: str | None, webhook_url: str | None):
     try:
         result = await asyncio.to_thread(transcribe_from_url, video_url)
     except Exception as e:
         print(f"Transcription failed: {e}")
+        if video_id and webhook_url:
+            await _send_webhook(webhook_url, {"success": False, "video_id": video_id, "error": str(e)})
         return
 
+    payload = {**result, "video_id": video_id} if video_id else result
     if webhook_url:
-        await _send_webhook(webhook_url, result)
+        await _send_webhook(webhook_url, payload)
 
 
 async def _send_webhook(url: str, payload: dict):
