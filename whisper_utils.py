@@ -5,7 +5,6 @@ import subprocess
 import re
 from typing import List, Dict
 from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api.formatters import SRTFormatter
 
 
 _model = None
@@ -36,13 +35,14 @@ def extract_youtube_transcript(video_url: str) -> List[Dict] | None:
         return None
 
     try:
-        transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=["en"])
+        api = YouTubeTranscriptApi()
+        fetched = api.fetch(video_id, languages=["en"])
         segments = []
-        for entry in transcript_list:
+        for snippet in fetched.snippets:
             segments.append({
-                "text": entry["text"].strip(),
-                "start": entry["start"],
-                "end": entry["start"] + entry.get("duration", 0),
+                "text": snippet.text.strip(),
+                "start": snippet.start,
+                "end": snippet.start + snippet.duration,
             })
         return segments
     except Exception:
