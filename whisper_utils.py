@@ -36,22 +36,24 @@ def extract_youtube_transcript(video_url: str) -> List[Dict] | None:
 
     try:
         resp = httpx.get(
-            f"https://youtubetranscript.com/?v={video_id}&format=json",
-            timeout=15,
+            f"https://youtubetranscript.com/?v={video_id}",
+            timeout=10,
         )
-        if resp.status_code != 200:
-            return None
-        data = resp.json()
-        segments = []
-        for entry in data:
-            segments.append({
-                "text": entry["text"].strip(),
-                "start": entry["start"],
-                "end": entry["start"] + entry.get("duration", 0),
-            })
-        return segments
+        if resp.status_code == 200 and resp.text.strip().startswith("<?xml"):
+            import xml.etree.ElementTree as ET
+            root = ET.fromstring(resp.text)
+            segments = []
+            for child in root:
+                text = (child.text or "").strip()
+                start = float(child.get("start", 0))
+                dur = float(child.get("dur", 0))
+                if text:
+                    segments.append({"text": text, "start": start, "end": start + dur})
+            return segments
     except Exception:
-        return None
+        pass
+
+    return None
 
 
 def _extract_audio(video_url: str) -> str:
