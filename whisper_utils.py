@@ -2,6 +2,7 @@ import whisper
 import tempfile
 import os
 import subprocess
+import re
 from typing import List, Dict
 
 
@@ -11,17 +12,98 @@ _model = None
 def get_model():
     global _model
     if _model is None:
-        _model = whisper.load_model("base")
+        _model = whisper.load_model("tiny")
     return _model
 
 
+def extract_subtitles(video_url: str) -> List[Dict] | None:
+    tmp_dir = tempfile.mkdtemp()
+    yt_dlp_path = os.environ.get("YT_DLP_PATH", "yt-dlp")
+
+    result = subprocess.run(
+        [
+            yt_dlp_path,
+            "--skip-download",
+            "--write-auto-subs",
+            "--sub-lang", "en",
+            "--convert-subs", "srt",
+            "-o", os.path.join(tmp_dir, "%(id)s"),
+            "--print", "filename",
+            video_url,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    if result.returncode != 0:
+        return None
+
+    output_file = result.stdout.strip().split("\n")[0].strip()
+    srt_path = None
+    for f in os.listdir(tmp_dir):
+        if f.endswith(".srt") or f.endswith(".vtt"):
+            srt_path = os.path.join(tmp_dir, f)
+            break
+    if output_file and os.path.isfile(output_file):
+        possible = output_file
+        for ext in [".en.srt", ".srt", ".en.vtt", ".vtt"]:
+            candidate = possible + ext
+            if os.path.exists(candidate):
+                srt_path = candidate
+                break
+
+    if not srt_path or not os.path.exists(srt_path):
+        return None
+
+    with open(srt_path, encoding="utf-8", errors="replace") as f:
+        content = f.read()
+
+    segments = _parse_srt(content)
+
+    for f in os.listdir(tmp_dir):
+        fp = os.path.join(tmp_dir, f)
+        try:
+            os.remove(fp)
+        except OSError:
+            pass
+    try:
+        os.rmdir(tmp_dir)
+    except OSError:
+        pass
+
+    return segments if segments else None
+
+
+def _parse_srt(content: str) -> List[Dict]:
+    segments = []
+    block_pattern = re.compile(
+        r"\d+\n(\d{1,2}:\d{2}:\d{2}[.,]\d{3})\s*-->\s*(\d{1,2}:\d{2}:\d{2}[.,]\d{3})\n([\s\S]*?)(?=\n\n|\Z)",
+        re.MULTILINE,
+    )
+
+    def _ts_to_seconds(ts: str) -> float:
+        ts = ts.replace(",", ".")
+        parts = ts.split(":")
+        if len(parts) == 3:
+            return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+        return 0.0
+
+    for match in block_pattern.finditer(content):
+        start = _ts_to_seconds(match.group(1))
+        end = _ts_to_seconds(match.group(2))
+        text = " ".join(match.group(3).strip().split("\n"))
+        if text:
+            segments.append({"text": text, "start": start, "end": end})
+
+    return segments
+
+
 def extract_audio(video_url: str) -> str:
-    """Download audio from a URL using yt-dlp and return path to WAV file."""
     tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
     tmp.close()
 
     yt_dlp_path = os.environ.get("YT_DLP_PATH", "yt-dlp")
-    ffmpeg_path = os.environ.get("FFMPEG_PATH", "ffmpeg")
 
     result = subprocess.run(
         [
@@ -47,7 +129,6 @@ def extract_audio(video_url: str) -> str:
     if actual_file and os.path.exists(actual_file):
         return actual_file
 
-    # yt-dlp adds the extension automatically, find the actual file
     base = tmp.name.replace(".wav", "")
     for ext in [".wav", ".mp3", ".m4a", ".webm"]:
         candidate = base + ext
@@ -58,7 +139,6 @@ def extract_audio(video_url: str) -> str:
 
 
 def transcribe(audio_path: str) -> List[Dict]:
-    """Transcribe audio file using Whisper and return timestamped segments."""
     model = get_model()
     result = model.transcribe(audio_path, word_timestamps=True)
 
@@ -74,7 +154,16 @@ def transcribe(audio_path: str) -> List[Dict]:
 
 
 def transcribe_from_url(video_url: str) -> dict:
-    """Full pipeline: download audio, transcribe, cleanup."""
+    segments = extract_subtitles(video_url)
+    if segments:
+        full_text = " ".join(s["text"] for s in segments)
+        return {
+            "segments": segments,
+            "full_text": full_text,
+            "language": "en",
+            "source": "subtitles",
+        }
+
     audio_path = None
     try:
         audio_path = extract_audio(video_url)
@@ -84,6 +173,7 @@ def transcribe_from_url(video_url: str) -> dict:
             "segments": segments,
             "full_text": full_text,
             "language": "en",
+            "source": "whisper",
         }
     finally:
         if audio_path and os.path.exists(audio_path):
