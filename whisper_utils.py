@@ -23,18 +23,29 @@ def extract_audio(video_url: str) -> str:
     yt_dlp_path = os.environ.get("YT_DLP_PATH", "yt-dlp")
     ffmpeg_path = os.environ.get("FFMPEG_PATH", "ffmpeg")
 
-    subprocess.run(
+    result = subprocess.run(
         [
             yt_dlp_path,
             "-x",
             "--audio-format", "wav",
             "--audio-quality", "0",
             "-o", tmp.name.replace(".wav", ".%(ext)s"),
+            "--print", "filename",
             video_url,
         ],
-        check=True,
         capture_output=True,
+        text=True,
     )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"yt-dlp failed (exit {result.returncode}):\n"
+            f"stderr: {result.stderr[:2000]}"
+        )
+
+    actual_file = result.stdout.strip()
+    if actual_file and os.path.exists(actual_file):
+        return actual_file
 
     # yt-dlp adds the extension automatically, find the actual file
     base = tmp.name.replace(".wav", "")
