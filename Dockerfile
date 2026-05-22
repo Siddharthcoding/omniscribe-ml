@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip wheel setuptools
 RUN pip install --no-cache-dir --retries 5 --index-url https://download.pytorch.org/whl/cpu torch
-RUN pip install --no-cache-dir --retries 5 -r requirements.txt
+RUN pip install --no-cache-dir --retries 5 --no-build-isolation -r requirements.txt
 
 COPY . .
 
