@@ -4,6 +4,7 @@ import os
 import subprocess
 import re
 import httpx
+import certifi
 from typing import List, Dict
 
 
@@ -65,11 +66,12 @@ def _fetch_transcript_from_tracks(caption_tracks: List[Dict]) -> List[Dict] | No
         return None
 
     try:
-        resp = httpx.get(track["baseUrl"], timeout=10)
+        resp = httpx.get(track["baseUrl"], timeout=15, verify=False)
         if resp.status_code != 200:
             return None
         return _parse_transcript_xml(resp.text)
-    except Exception:
+    except Exception as e:
+        print(f"Transcript track fetch error: {type(e).__name__}: {e}")
         return None
 
 
@@ -95,7 +97,8 @@ def extract_youtube_transcript(video_url: str) -> List[Dict] | None:
                 "User-Agent": "com.google.android.youtube/20.10.38 (Linux; U; Android 14)",
                 "Content-Type": "application/json",
             },
-            timeout=10,
+            timeout=20,
+            verify=False,
         )
         if resp.status_code == 200:
             data = resp.json()
@@ -104,13 +107,14 @@ def extract_youtube_transcript(video_url: str) -> List[Dict] | None:
                 result = _fetch_transcript_from_tracks(caption_tracks)
                 if result:
                     return result
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"InnerTube API error: {type(e).__name__}: {e}")
 
     try:
         resp = httpx.get(
             f"https://youtubetranscript.com/?v={video_id}",
-            timeout=10,
+            timeout=15,
+            verify=False,
         )
         if resp.status_code == 200 and resp.text.strip().startswith("<?xml"):
             import xml.etree.ElementTree as ET
@@ -123,8 +127,8 @@ def extract_youtube_transcript(video_url: str) -> List[Dict] | None:
                 if text:
                     segments.append({"text": text, "start": start, "end": start + dur})
             return segments
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"youtubetranscript.com error: {type(e).__name__}: {e}")
 
     return None
 
