@@ -35,13 +35,19 @@ def extract_youtube_transcript(video_url: str) -> List[Dict] | None:
         return None
 
     try:
-        from youtube_transcript_api import YouTubeTranscriptApi
+        from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, VideoUnavailable, NoTranscriptFound
         transcript = YouTubeTranscriptApi.get_transcript(video_id)
         if transcript:
             return [
                 {"text": s["text"], "start": s["start"], "end": s["start"] + s["duration"]}
                 for s in transcript
             ]
+    except ImportError:
+        print("youtube-transcript-api not installed")
+    except (TranscriptsDisabled, NoTranscriptFound) as e:
+        print(f"No transcript available: {e}")
+    except VideoUnavailable:
+        print("Video unavailable")
     except Exception as e:
         print(f"youtube-transcript-api error: {type(e).__name__}: {e}")
 
