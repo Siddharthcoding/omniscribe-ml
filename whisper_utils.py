@@ -5,7 +5,8 @@ import subprocess
 import re
 import logging
 import httpx
-from typing import List, Dict
+import requests as req_lib
+from typing import List, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -128,10 +129,11 @@ def extract_youtube_transcript(video_url: str) -> List[Dict] | None:
     logger.info("[extract] [video=%s] InnerTube failed, trying youtube-transcript-api library", video_id)
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
-        from youtube_transcript_api.formatters import JSONFormatter
-        fetched = YouTubeTranscriptApi.get_transcript(video_id)
-        if fetched:
-            segments = [{"text": s["text"], "start": s["start"], "end": s["start"] + s["duration"]} for s in fetched]
+        ytt = YouTubeTranscriptApi()
+        fetched = ytt.fetch(video_id)
+        raw = fetched.to_raw_data()
+        if raw:
+            segments = [{"text": s["text"], "start": s["start"], "end": s["start"] + s["duration"]} for s in raw]
             logger.info("[extract] [video=%s] youtube-transcript-api got %d segments", video_id, len(segments))
             return segments
     except Exception as e:
@@ -268,15 +270,169 @@ def transcribe(audio_path: str) -> List[Dict]:
     return segments
 
 
-def transcribe_from_url(video_url: str) -> dict:
-    logger.info("[transcribe] Starting transcription for %s", video_url)
+def _parse_srt(srt_text: str) -> List[Dict] | None:
+    """Parse SRT subtitle format into segments list."""
+    segments = []
+    blocks = re.split(r'\n\s*\n', srt_text.strip())
+    for block in blocks:
+        lines = block.strip().split('\n')
+        if len(lines) < 3:
+            continue
+        # Skip the index line (numeric sequence number)
+        time_line = None
+        text_lines = []
+        for line in lines:
+            if '-->' in line:
+                time_line = line
+            elif time_line is not None:
+                text_lines.append(line)
+        if not time_line or not text_lines:
+            continue
+        # Parse timestamps: 00:00:01,540 --> 00:00:04,160
+        time_match = re.match(r'(\d+):(\d+):(\d+)[,.](\d+)\s*-->\s*(\d+):(\d+):(\d+)[,.](\d+)', time_line)
+        if not time_match:
+            continue
+        start_sec = int(time_match.group(1)) * 3600 + int(time_match.group(2)) * 60 + int(time_match.group(3)) + int(time_match.group(4)) / 1000
+        end_sec = int(time_match.group(5)) * 3600 + int(time_match.group(6)) * 60 + int(time_match.group(7)) + int(time_match.group(8)) / 1000
+        text = ' '.join(text_lines).strip()
+        if text:
+            segments.append({"text": text, "start": start_sec, "end": end_sec})
+    return segments if segments else None
 
-    # First try: YouTube API
-    logger.info("[transcribe] Phase 1/3: Trying YouTube API transcript...")
+
+def _parse_vtt(vtt_text: str) -> List[Dict] | None:
+    """Parse WebVTT format into segments list."""
+    segments = []
+    for block in re.split(r'\n\s*\n', vtt_text.strip()):
+        lines = block.strip().split('\n')
+        # Skip header lines (WEBVTT, etc.)
+        time_line = None
+        text_lines = []
+        for line in lines:
+            if '-->' in line:
+                time_line = line
+            elif time_line is not None and not line.startswith('NOTE'):
+                text_lines.append(line)
+        if not time_line or not text_lines:
+            continue
+        # Parse timestamps: 00:00:01.540 --> 00:00:04.160
+        time_match = re.match(r'(\d+):(\d+):(\d+)[.](\d+)\s*-->\s*(\d+):(\d+):(\d+)[.](\d+)', time_line)
+        if not time_match:
+            continue
+        start_sec = int(time_match.group(1)) * 3600 + int(time_match.group(2)) * 60 + int(time_match.group(3)) + int(time_match.group(4)) / 1000
+        end_sec = int(time_match.group(5)) * 3600 + int(time_match.group(6)) * 60 + int(time_match.group(7)) + int(time_match.group(8)) / 1000
+        text = ' '.join(text_lines).strip()
+        if text:
+            segments.append({"text": text, "start": start_sec, "end": end_sec})
+    return segments if segments else None
+
+
+def _fetch_youtube_data_api(video_id: str, access_token: str) -> List[Dict] | None:
+    """Fetch transcript using YouTube Data API v3 with OAuth 2.0."""
+    logger.info("[youtube-data-api] [video=%s] Fetching captions list via YouTube Data API", video_id)
+
+    headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
+
+    # Step 1: List available caption tracks
+    try:
+        list_url = f"https://www.googleapis.com/youtube/v3/captions?part=snippet&videoId={video_id}"
+        list_resp = req_lib.get(list_url, headers=headers, timeout=15)
+        logger.info("[youtube-data-api] [video=%s] captions.list responded with %s", video_id, list_resp.status_code)
+
+        if list_resp.status_code != 200:
+            logger.warning("[youtube-data-api] [video=%s] captions.list failed: %s", video_id, list_resp.text[:300])
+            return None
+
+        list_data = list_resp.json()
+        items = list_data.get("items", [])
+        if not items:
+            logger.info("[youtube-data-api] [video=%s] No caption tracks found via YouTube Data API", video_id)
+            return None
+
+        logger.info("[youtube-data-api] [video=%s] Found %d caption tracks", video_id, len(items))
+    except Exception as e:
+        logger.warning("[youtube-data-api] [video=%s] captions.list error: %s", video_id, e)
+        return None
+
+    # Step 2: Pick the best track (English first, then first available)
+    track_id = None
+    track_lang = None
+    for item in items:
+        snippet = item.get("snippet", {})
+        lang = snippet.get("language", "")
+        if lang == "en":
+            track_id = item["id"]
+            track_lang = lang
+            logger.info("[youtube-data-api] [video=%s] Selected English caption track: %s", video_id, track_id)
+            break
+    if not track_id and items:
+        track_id = items[0]["id"]
+        track_lang = items[0].get("snippet", {}).get("language", "en")
+        logger.info("[youtube-data-api] [video=%s] No English track, using track %s (lang=%s)", video_id, track_id, track_lang)
+
+    if not track_id:
+        return None
+
+    # Step 3: Download the caption track
+    try:
+        download_url = f"https://www.googleapis.com/youtube/v3/captions/{track_id}?tfmt=srt"
+        dl_resp = req_lib.get(download_url, headers=headers, timeout=30)
+        logger.info("[youtube-data-api] [video=%s] captions.download responded with %s (content-type: %s)",
+                    video_id, dl_resp.status_code, dl_resp.headers.get("content-type", ""))
+
+        if dl_resp.status_code == 200:
+            content_type = dl_resp.headers.get("content-type", "")
+            text = dl_resp.text
+
+            segments = None
+            if "srt" in content_type or text.strip().startswith("1"):
+                segments = _parse_srt(text)
+            elif "vtt" in content_type or text.strip().startswith("WEBVTT"):
+                segments = _parse_vtt(text)
+            else:
+                # Try SRT first, then VTT
+                segments = _parse_srt(text) or _parse_vtt(text)
+
+            if segments:
+                logger.info("[youtube-data-api] [video=%s] Got %d segments from YouTube Data API", video_id, len(segments))
+                return segments
+            else:
+                logger.warning("[youtube-data-api] [video=%s] Failed to parse download content (first 200 chars): %s",
+                               video_id, text[:200])
+        else:
+            logger.warning("[youtube-data-api] [video=%s] captions.download returned %s: %s",
+                           video_id, dl_resp.status_code, dl_resp.text[:300])
+    except Exception as e:
+        logger.warning("[youtube-data-api] [video=%s] captions.download error: %s", video_id, e)
+
+    return None
+
+
+def transcribe_from_url(video_url: str, youtube_access_token: str | None = None) -> dict:
+    logger.info("[transcribe] Starting transcription for %s", video_url)
+    video_id = _extract_video_id(video_url)
+
+    # Phase 1: Try YouTube Data API with OAuth token (most reliable)
+    if youtube_access_token and video_id:
+        logger.info("[transcribe] Phase 1/4: Trying YouTube Data API with OAuth token...")
+        segments = _fetch_youtube_data_api(video_id, youtube_access_token)
+        if segments:
+            full_text = " ".join(s["text"] for s in segments)
+            logger.info("[transcribe] Phase 1/4 SUCCESS: %d segments from YouTube Data API", len(segments))
+            return {
+                "segments": segments,
+                "full_text": full_text,
+                "language": "en",
+                "source": "youtube_data_api",
+            }
+        logger.info("[transcribe] Phase 1/4: YouTube Data API failed or yielded no segments")
+
+    # Phase 2: Try InnerTube API (no auth, may work depending on IP)
+    logger.info("[transcribe] Phase 2/4: Trying InnerTube API transcript...")
     segments = extract_youtube_transcript(video_url)
     if segments:
         full_text = " ".join(s["text"] for s in segments)
-        logger.info("[transcribe] Phase 1/3 SUCCESS: %d segments from YouTube API", len(segments))
+        logger.info("[transcribe] Phase 2/4 SUCCESS: %d segments from InnerTube API", len(segments))
         return {
             "segments": segments,
             "full_text": full_text,
@@ -284,16 +440,37 @@ def transcribe_from_url(video_url: str) -> dict:
             "source": "youtube_api",
         }
 
-    # Second try: Whisper transcription
-    logger.info("[transcribe] Phase 2/3: YouTube API failed, attempting Whisper transcription...")
+    # Phase 3: Try youtube-transcript-api library
+    logger.info("[transcribe] Phase 3/4: Trying youtube-transcript-api library...")
+    if video_id:
+        try:
+            from youtube_transcript_api import YouTubeTranscriptApi
+            ytt = YouTubeTranscriptApi()
+            fetched = ytt.fetch(video_id)
+            raw_data = fetched.to_raw_data()
+            if raw_data:
+                segments = [{"text": s["text"], "start": s["start"], "end": s["start"] + s["duration"]} for s in raw_data]
+                full_text = " ".join(s["text"] for s in segments)
+                logger.info("[transcribe] Phase 3/4 SUCCESS: %d segments from youtube-transcript-api", len(segments))
+                return {
+                    "segments": segments,
+                    "full_text": full_text,
+                    "language": "en",
+                    "source": "youtube_transcript_api",
+                }
+        except Exception as e:
+            logger.warning("[transcribe] Phase 3/4: youtube-transcript-api failed: %s", e)
+
+    # Phase 4: Fall back to Whisper transcription (download audio + transcribe)
+    logger.info("[transcribe] Phase 4/4: All APIs failed, attempting Whisper transcription...")
     audio_path = None
     try:
-        logger.info("[transcribe] Phase 2a/3: Extracting audio...")
+        logger.info("[transcribe] Phase 4a/4: Extracting audio...")
         audio_path = _extract_audio(video_url)
-        logger.info("[transcribe] Phase 2b/3: Running Whisper on %s...", audio_path)
+        logger.info("[transcribe] Phase 4b/4: Running Whisper on %s...", audio_path)
         segments = transcribe(audio_path)
         full_text = " ".join(s["text"] for s in segments)
-        logger.info("[transcribe] Phase 2/3 SUCCESS: %d segments from Whisper", len(segments))
+        logger.info("[transcribe] Phase 4/4 SUCCESS: %d segments from Whisper", len(segments))
         return {
             "segments": segments,
             "full_text": full_text,

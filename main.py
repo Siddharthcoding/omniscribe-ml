@@ -20,6 +20,7 @@ class TranscribeRequest(BaseModel):
     video_url: str
     video_id: str | None = None
     webhook_url: str | None = None
+    youtube_access_token: str | None = None
 
 
 class TranscribeResponse(BaseModel):
@@ -38,16 +39,19 @@ def verify_auth(authorization: str | None = Header(None)):
 @app.post("/transcribe", response_model=TranscribeResponse)
 async def transcribe_endpoint(req: TranscribeRequest, authorization: str | None = Header(None)):
     verify_auth(authorization)
-    logger.info("[transcribe] [video=%s] Accepted transcription request for %s, webhook=%s",
-                req.video_id, req.video_url, req.webhook_url)
-    asyncio.create_task(_process_and_webhook(req.video_url, req.video_id, req.webhook_url))
+    logger.info("[transcribe] [video=%s] Accepted transcription request for %s, webhook=%s, has_youtube_token=%s",
+                req.video_id, req.video_url, req.webhook_url, bool(req.youtube_access_token))
+    asyncio.create_task(_process_and_webhook(
+        req.video_url, req.video_id, req.webhook_url,
+        youtube_access_token=req.youtube_access_token,
+    ))
     return {"status": "accepted"}
 
 
-async def _process_and_webhook(video_url: str, video_id: str | None, webhook_url: str | None):
-    logger.info("[process] [video=%s] Starting transcription (will try YouTube API first, then Whisper)", video_id)
+async def _process_and_webhook(video_url: str, video_id: str | None, webhook_url: str | None, youtube_access_token: str | None = None):
+    logger.info("[process] [video=%s] Starting transcription (youtube_token=%s)", video_id, bool(youtube_access_token))
     try:
-        result = await asyncio.to_thread(transcribe_from_url, video_url)
+        result = await asyncio.to_thread(transcribe_from_url, video_url, youtube_access_token=youtube_access_token)
         seg_count = len(result.get("segments", []))
         source = result.get("source", "unknown")
         logger.info("[process] [video=%s] Transcription complete: %d segments, source=%s",
