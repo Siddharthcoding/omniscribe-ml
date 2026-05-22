@@ -53,73 +53,89 @@ def _parse_transcript_xml(xml: str) -> List[Dict] | None:
     return segments if segments else None
 
 
+def _try_innertube_client(video_id: str, client_name: str, client_version: str) -> List[Dict] | None:
+    """Try to fetch captions via InnerTube API with a specific client."""
+    import requests as req
+    user_agent = f"Mozilla/5.0 (compatible; {client_name}/{client_version})"
+    if client_name == "ANDROID":
+        user_agent = f"com.google.android.youtube/{client_version} (Linux; U; Android 14)"
+
+    resp = req.post(
+        "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
+        json={
+            "context": {
+                "client": {
+                    "clientName": client_name,
+                    "clientVersion": client_version,
+                    "hl": "en",
+                }
+            },
+            "videoId": video_id,
+        },
+        headers={
+            "User-Agent": user_agent,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        timeout=20,
+        verify=False,
+    )
+    if resp.status_code != 200:
+        logger.info("[innertube] [video=%s] client=%s responded with %s", video_id, client_name, resp.status_code)
+        return None
+
+    data = resp.json()
+    # Log response structure for debugging
+    top_keys = list(data.keys())
+    logger.info("[innertube] [video=%s] client=%s response keys: %s", video_id, client_name, top_keys)
+
+    # Try multiple paths to find caption tracks
+    captions = data.get("captions") or {}
+    if isinstance(captions, dict):
+        tracklist = captions.get("playerCaptionsTracklistRenderer") or {}
+        caption_tracks = tracklist.get("captionTracks") or []
+        if caption_tracks:
+            logger.info("[innertube] [video=%s] client=%s found %d tracks via captions path", video_id, client_name, len(caption_tracks))
+            return _fetch_transcript_from_tracks(caption_tracks)
+        else:
+            logger.info("[innertube] [video=%s] client=%s captionTracks empty, tracklist keys: %s", video_id, client_name, list(tracklist.keys()))
+    else:
+        logger.info("[innertube] [video=%s] client=%s 'captions' key missing or not a dict", video_id, client_name)
+
+    return None
+
+
 def extract_youtube_transcript(video_url: str) -> List[Dict] | None:
     video_id = _extract_video_id(video_url)
     if not video_id:
         logger.info("[extract] Not a YouTube URL, skipping YouTube transcript extraction")
         return None
 
-    logger.info("[extract] [video=%s] Attempting InnerTube API transcript fetch", video_id)
-    try:
-        import requests as req
-        resp = req.post(
-            "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
-            json={
-                "context": {
-                    "client": {
-                        "clientName": "ANDROID",
-                        "clientVersion": "20.10.38",
-                        "hl": "en",
-                    }
-                },
-                "videoId": video_id,
-            },
-            headers={
-                "User-Agent": "com.google.android.youtube/20.10.38 (Linux; U; Android 14)",
-                "Content-Type": "application/json",
-            },
-            timeout=20,
-            verify=False,
-        )
-        logger.info("[extract] [video=%s] InnerTube API responded with %s", video_id, resp.status_code)
-        if resp.status_code == 200:
-            data = resp.json()
-            caption_tracks = data.get("captions", {}).get("playerCaptionsTracklistRenderer", {}).get("captionTracks", [])
-            if caption_tracks:
-                logger.info("[extract] [video=%s] Found %d caption tracks via InnerTube", video_id, len(caption_tracks))
-                return _fetch_transcript_from_tracks(caption_tracks)
-            else:
-                logger.info("[extract] [video=%s] InnerTube returned 200 but no caption tracks found", video_id)
-        else:
-            logger.warning("[extract] [video=%s] InnerTube returned %s", video_id, resp.status_code)
-    except Exception as e:
-        logger.warning("[extract] [video=%s] InnerTube (requests) error: %s", video_id, e)
-
-    logger.info("[extract] [video=%s] Falling back to youtubetranscript.com", video_id)
-    try:
-        resp = httpx.get(
-            f"https://youtubetranscript.com/?v={video_id}",
-            timeout=15,
-            verify=False,
-        )
-        logger.info("[extract] [video=%s] youtubetranscript.com responded with %s", video_id, resp.status_code)
-        if resp.status_code == 200 and resp.text.strip().startswith("<?xml"):
-            import xml.etree.ElementTree as ET
-            root = ET.fromstring(resp.text)
-            segments = []
-            for child in root:
-                text = (child.text or "").strip()
-                start = float(child.get("start", 0))
-                dur = float(child.get("dur", 0))
-                if text:
-                    segments.append({"text": text, "start": start, "end": start + dur})
-            logger.info("[extract] [video=%s] Got %d segments from youtubetranscript.com", video_id, len(segments))
+    # Try multiple InnerTube clients
+    clients = [
+        ("ANDROID", "20.10.38"),
+        ("WEB", "2.20231201"),
+        ("WEB_EMBEDDED_PLAYER", "1.0"),
+        ("ANDROID_MUSIC", "6.42.52"),
+    ]
+    for client_name, client_version in clients:
+        logger.info("[extract] [video=%s] Trying InnerTube client=%s/%s", video_id, client_name, client_version)
+        segments = _try_innertube_client(video_id, client_name, client_version)
+        if segments:
             return segments
-        else:
-            logger.warning("[extract] [video=%s] youtubetranscript.com returned %s (body start: %s)",
-                           video_id, resp.status_code, resp.text[:100])
+
+    # Fallback: youtube-transcript-api library (might work on Render's IP)
+    logger.info("[extract] [video=%s] InnerTube failed, trying youtube-transcript-api library", video_id)
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+        from youtube_transcript_api.formatters import JSONFormatter
+        fetched = YouTubeTranscriptApi.get_transcript(video_id)
+        if fetched:
+            segments = [{"text": s["text"], "start": s["start"], "end": s["start"] + s["duration"]} for s in fetched]
+            logger.info("[extract] [video=%s] youtube-transcript-api got %d segments", video_id, len(segments))
+            return segments
     except Exception as e:
-        logger.warning("[extract] [video=%s] youtubetranscript.com error: %s", video_id, e)
+        logger.warning("[extract] [video=%s] youtube-transcript-api failed: %s", video_id, e)
 
     logger.info("[extract] [video=%s] No YouTube transcript available via API", video_id)
     return None
@@ -152,6 +168,23 @@ def _fetch_transcript_from_tracks(caption_tracks: List[Dict]) -> List[Dict] | No
         return None
 
 
+def _get_cookies_file() -> str | None:
+    encoded = os.environ.get("YOUTUBE_COOKIES")
+    if not encoded:
+        return None
+    import base64
+    try:
+        decoded = base64.b64decode(encoded).decode("utf-8")
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False)
+        tmp.write(decoded)
+        tmp.close()
+        logger.info("[cookies] Wrote cookies file to %s (%d bytes)", tmp.name, len(decoded))
+        return tmp.name
+    except Exception as e:
+        logger.warning("[cookies] Failed to decode YOUTUBE_COOKIES: %s", e)
+        return None
+
+
 def _extract_audio(video_url: str) -> str:
     logger.info("[audio] [url=%s] Extracting audio via yt-dlp...", video_url)
     tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
@@ -160,29 +193,38 @@ def _extract_audio(video_url: str) -> str:
     yt_dlp_path = os.environ.get("YT_DLP_PATH", "yt-dlp")
     logger.info("[audio] Using yt-dlp path: %s", yt_dlp_path)
 
-    result = subprocess.run(
-        [
-            yt_dlp_path,
-            "-x",
-            "--audio-format", "wav",
-            "--audio-quality", "0",
-            "-o", tmp.name.replace(".wav", ".%(ext)s"),
-            "--print", "filename",
-            "--no-check-certificates",
-            "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-            "--add-header", "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "--add-header", "Accept-Language:en-US,en;q=0.9",
-            "--add-header", "Origin:https://www.youtube.com",
-            "--extractor-args", "youtube:player_client=android,web;skip=webpage",
-            "--retries", "5",
-            "--throttled-rate", "100M",
-            "--concurrent-fragments", "1",
-            "--geo-bypass",
-            video_url,
-        ],
-        capture_output=True,
-        text=True,
-    )
+    cmd = [
+        yt_dlp_path,
+        "-x",
+        "--audio-format", "wav",
+        "--audio-quality", "0",
+        "-o", tmp.name.replace(".wav", ".%(ext)s"),
+        "--print", "filename",
+        "--no-check-certificates",
+        "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        "--add-header", "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "--add-header", "Accept-Language:en-US,en;q=0.9",
+        "--add-header", "Origin:https://www.youtube.com",
+        "--extractor-args", "youtube:player_client=android,web;skip=webpage",
+        "--retries", "5",
+        "--throttled-rate", "100M",
+        "--concurrent-fragments", "1",
+        "--geo-bypass",
+    ]
+
+    cookies_file = _get_cookies_file()
+    if cookies_file:
+        cmd.extend(["--cookies", cookies_file])
+        logger.info("[audio] Using cookies file for authentication")
+
+    cmd.append(video_url)
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+    finally:
+        if cookies_file and os.path.exists(cookies_file):
+            os.unlink(cookies_file)
+            logger.info("[audio] Cleaned up cookies file")
 
     if result.returncode != 0:
         stderr_preview = result.stderr[:2000] if result.stderr else "(no stderr)"
