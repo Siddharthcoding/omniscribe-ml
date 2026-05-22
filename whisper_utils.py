@@ -29,29 +29,103 @@ def _extract_video_id(url: str) -> str | None:
     return None
 
 
+def _parse_transcript_xml(xml: str) -> List[Dict] | None:
+    segments = []
+
+    for match in re.finditer(r'<text start="([\d.]+)" dur="([\d.]+)">(.*?)</text>', xml, re.DOTALL):
+        text = match.group(3).replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&#39;", "'").replace("&quot;", '"')
+        start = float(match.group(1))
+        dur = float(match.group(2))
+        segments.append({"text": text, "start": start, "end": start + dur})
+
+    if not segments:
+        for match in re.finditer(r'<p t="([\d.]+)" d="([\d.]+)"[^>]*>(.*?)</p>', xml, re.DOTALL):
+            content = re.sub(r"<[^>]+>", "", match.group(3))
+            text = content.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&#39;", "'").replace("&quot;", '"')
+            t = float(match.group(1)) / 1000
+            d = float(match.group(2)) / 1000
+            segments.append({"text": text, "start": t, "end": t + d})
+
+    return segments if segments else None
+
+
 def extract_youtube_transcript(video_url: str) -> List[Dict] | None:
     video_id = _extract_video_id(video_url)
     if not video_id:
         return None
 
     try:
-        from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, VideoUnavailable, NoTranscriptFound
-        transcript = YouTubeTranscriptApi.get_transcript(video_id)
-        if transcript:
-            return [
-                {"text": s["text"], "start": s["start"], "end": s["start"] + s["duration"]}
-                for s in transcript
-            ]
-    except ImportError:
-        print("youtube-transcript-api not installed")
-    except (TranscriptsDisabled, NoTranscriptFound) as e:
-        print(f"No transcript available: {e}")
-    except VideoUnavailable:
-        print("Video unavailable")
+        import requests as req
+        resp = req.post(
+            "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
+            json={
+                "context": {
+                    "client": {
+                        "clientName": "ANDROID",
+                        "clientVersion": "20.10.38",
+                        "hl": "en",
+                    }
+                },
+                "videoId": video_id,
+            },
+            headers={
+                "User-Agent": "com.google.android.youtube/20.10.38 (Linux; U; Android 14)",
+                "Content-Type": "application/json",
+            },
+            timeout=20,
+            verify=False,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            caption_tracks = data.get("captions", {}).get("playerCaptionsTracklistRenderer", {}).get("captionTracks", [])
+            if caption_tracks:
+                return _fetch_transcript_from_tracks(caption_tracks)
     except Exception as e:
-        print(f"youtube-transcript-api error: {type(e).__name__}: {e}")
+        print(f"InnerTube (requests) error: {type(e).__name__}: {e}")
+
+    try:
+        resp = httpx.get(
+            f"https://youtubetranscript.com/?v={video_id}",
+            timeout=15,
+            verify=False,
+        )
+        if resp.status_code == 200 and resp.text.strip().startswith("<?xml"):
+            import xml.etree.ElementTree as ET
+            root = ET.fromstring(resp.text)
+            segments = []
+            for child in root:
+                text = (child.text or "").strip()
+                start = float(child.get("start", 0))
+                dur = float(child.get("dur", 0))
+                if text:
+                    segments.append({"text": text, "start": start, "end": start + dur})
+            return segments
+    except Exception as e:
+        print(f"youtubetranscript.com error: {type(e).__name__}: {e}")
 
     return None
+
+
+def _fetch_transcript_from_tracks(caption_tracks: List[Dict]) -> List[Dict] | None:
+    track = None
+    for t in caption_tracks:
+        if t.get("languageCode") == "en":
+            track = t
+            break
+    if not track and caption_tracks:
+        track = caption_tracks[0]
+    if not track:
+        return None
+
+    try:
+        import requests as req
+        resp = req.get(track["baseUrl"], timeout=15, verify=False)
+        if resp.status_code != 200:
+            return None
+        return _parse_transcript_xml(resp.text)
+    except Exception as e:
+        print(f"Transcript track error: {type(e).__name__}: {e}")
+        return None
 
 
 def _extract_audio(video_url: str) -> str:
