@@ -81,7 +81,7 @@ async def _send_webhook(url: str, payload: dict):
                 logger.warning("[webhook] No SUPABASE_ANON_KEY set, webhook call may be rejected by Supabase")
             resp = await client.post(url, json=payload, headers=headers, timeout=60)
             logger.info("[webhook] Sent to %s, status=%d", url, resp.status_code)
-            if not resp.ok:
+            if not resp.is_success:
                 body = await resp.aread()
                 logger.warning("[webhook] Non-200 response: %s", body.decode()[:500])
         except Exception as e:
