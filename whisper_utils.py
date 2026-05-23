@@ -54,7 +54,7 @@ def _parse_transcript_xml(xml: str) -> List[Dict] | None:
     return segments if segments else None
 
 
-def _try_innertube_client(video_id: str, client_name: str, client_version: str, access_token: str | None = None) -> List[Dict] | None:
+def _try_innertube_client(video_id: str, client_name: str, client_version: str) -> List[Dict] | None:
     """Try to fetch captions via InnerTube API with a specific client."""
     import requests as req
     user_agent = f"Mozilla/5.0 (compatible; {client_name}/{client_version})"
@@ -66,8 +66,6 @@ def _try_innertube_client(video_id: str, client_name: str, client_version: str, 
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
-    if access_token:
-        headers["Authorization"] = f"Bearer {access_token}"
 
     resp = req.post(
         "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
@@ -110,7 +108,7 @@ def _try_innertube_client(video_id: str, client_name: str, client_version: str, 
     return None
 
 
-def extract_youtube_transcript(video_url: str, youtube_access_token: str | None = None) -> List[Dict] | None:
+def extract_youtube_transcript(video_url: str) -> List[Dict] | None:
     video_id = _extract_video_id(video_url)
     if not video_id:
         logger.info("[extract] Not a YouTube URL, skipping YouTube transcript extraction")
@@ -125,17 +123,9 @@ def extract_youtube_transcript(video_url: str, youtube_access_token: str | None 
         ("WEB_EMBEDDED_PLAYER", "1.0"),
     ]
 
-    if youtube_access_token:
-        clients.insert(0, ("ANDROID", "20.10.38", youtube_access_token))
-
-    for client_info in clients:
-        if len(client_info) == 3:
-            client_name, client_version, token = client_info
-        else:
-            client_name, client_version = client_info
-            token = youtube_access_token
+    for client_name, client_version in clients:
         logger.info("[extract] [video=%s] Trying InnerTube client=%s/%s", video_id, client_name, client_version)
-        segments = _try_innertube_client(video_id, client_name, client_version, access_token=token)
+        segments = _try_innertube_client(video_id, client_name, client_version)
         if segments:
             return segments
 
@@ -201,7 +191,7 @@ def _get_cookies_file() -> str | None:
         return None
 
 
-def _extract_audio(video_url: str, youtube_access_token: str | None = None) -> str:
+def _extract_audio(video_url: str) -> str:
     logger.info("[audio] [url=%s] Extracting audio via yt-dlp...", video_url)
     tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
     tmp.close()
@@ -231,8 +221,10 @@ def _extract_audio(video_url: str, youtube_access_token: str | None = None) -> s
         "--max-sleep-interval", "30",
     ]
 
-    if youtube_access_token:
-        cmd.extend(["--add-header", f"Authorization: Bearer {youtube_access_token}"])
+    youtube_proxy = os.environ.get("YOUTUBE_PROXY")
+    if youtube_proxy:
+        cmd.extend(["--proxy", youtube_proxy])
+        logger.info("[audio] Using proxy for yt-dlp")
 
     cookies_file = _get_cookies_file()
     if cookies_file:
@@ -449,7 +441,7 @@ def transcribe_from_url(video_url: str, youtube_access_token: str | None = None)
 
     # Phase 2: Try InnerTube API (no auth, may work depending on IP)
     logger.info("[transcribe] Phase 2/4: Trying InnerTube API transcript...")
-    segments = extract_youtube_transcript(video_url, youtube_access_token=youtube_access_token)
+    segments = extract_youtube_transcript(video_url)
     if segments:
         full_text = " ".join(s["text"] for s in segments)
         logger.info("[transcribe] Phase 2/4 SUCCESS: %d segments from InnerTube API", len(segments))
@@ -486,7 +478,7 @@ def transcribe_from_url(video_url: str, youtube_access_token: str | None = None)
     audio_path = None
     try:
         logger.info("[transcribe] Phase 4a/4: Extracting audio...")
-        audio_path = _extract_audio(video_url, youtube_access_token=youtube_access_token)
+        audio_path = _extract_audio(video_url)
         logger.info("[transcribe] Phase 4b/4: Running Whisper on %s...", audio_path)
         segments = transcribe(audio_path)
         full_text = " ".join(s["text"] for s in segments)
